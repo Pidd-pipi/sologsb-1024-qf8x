@@ -56,6 +56,7 @@ import { CSS } from '@dnd-kit/utilities';
 import {
   AlertCircle,
   ArrowDown,
+  ArrowLeftRight,
   ArrowUp,
   CheckCircle2,
   ChevronRight,
@@ -96,7 +97,18 @@ import {
   formatTime,
   useLightingDesk
 } from './state/useLightingDesk';
-import type { Cue, CueConflict, LightingPlan, Scene, UserRole, Workspace } from './types';
+import { VenueMappingModal } from './VenueMappingModal';
+import { applyVenueMappingToPlan, draftVenueMapping } from './venueMapping';
+import type {
+  ChannelMappingEntry,
+  Cue,
+  CueConflict,
+  LightingPlan,
+  Scene,
+  UserRole,
+  VenueMapping,
+  Workspace
+} from './types';
 
 const statusColors = {
   draft: 'orange',
@@ -572,6 +584,7 @@ export default function App() {
   const [online, setOnline] = useState(true);
   const [savedAt, setSavedAt] = useState('');
   const [syncMessage, setSyncMessage] = useState('离线草稿待命');
+  const [mappingOpen, setMappingOpen] = useState(false);
   const toast = useToast();
   const workspace = state.workspace;
   const activePlan = findActivePlan(workspace);
@@ -712,6 +725,8 @@ export default function App() {
       copy.id = id;
       copy.name = `${source.name} · 副本`;
       copy.description = '从现有方案复制，可独立调整场次和提示。';
+      // 换台映射针对原场馆灯号，副本通道可能已是新灯号，不沿用旧对账记录
+      delete copy.venueMapping;
       copy.scenes.forEach((scene) => {
         scene.id = `${id}-${scene.id}`;
         scene.cues.forEach((cue) => {
@@ -726,6 +741,44 @@ export default function App() {
       next.selectedCueId = copy.scenes[0]?.cues[0]?.id ?? '';
     });
     toast({ title: '已复制方案', status: 'success' });
+  }
+
+  function importVenueMapping(
+    entries: ChannelMappingEntry[],
+    venueName: string,
+    source: VenueMapping['source'],
+    warnings: string[]
+  ) {
+    commit('导入换台通道映射（待确认）', (next) => {
+      const plan = next.plans.find((item) => item.id === next.activePlanId);
+      if (!plan) return;
+      plan.venueMapping = draftVenueMapping(plan, entries, { venueName, source, warnings });
+    });
+  }
+
+  function applyVenueMapping() {
+    commit('舞台监督确认换台映射并重算', (next) => {
+      const plan = next.plans.find((item) => item.id === next.activePlanId);
+      if (!plan || !plan.venueMapping) return;
+      applyVenueMappingToPlan(plan, plan.venueMapping.entries, {
+        venueName: plan.venueMapping.venueName,
+        source: plan.venueMapping.source,
+        role: next.role
+      });
+    });
+  }
+
+  function resetVenueMapping() {
+    if (activePlan.venueMapping?.status === 'applied') {
+      const ok = window.confirm(
+        '重新对账会清除映射记录，但已改写的通道不会自动还原（可使用 Ctrl/⌘+Z 撤销应用）。是否继续？'
+      );
+      if (!ok) return;
+    }
+    commit('清除换台对账记录', (next) => {
+      const plan = next.plans.find((item) => item.id === next.activePlanId);
+      if (plan) delete plan.venueMapping;
+    });
   }
 
   function jumpIncomplete() {
@@ -805,7 +858,21 @@ export default function App() {
       exportedAt: new Date().toISOString(),
       plan: activePlan,
       conflicts: activeConflicts,
-      role: workspace.role
+      role: workspace.role,
+      venueMapping: activePlan.venueMapping
+        ? {
+            venueName: activePlan.venueMapping.venueName,
+            importedAt: activePlan.venueMapping.importedAt,
+            status: activePlan.venueMapping.status,
+            source: activePlan.venueMapping.source,
+            pendingCounts: activePlan.venueMapping.counts,
+            applyResult: activePlan.venueMapping.applyResult ?? null,
+            entries: activePlan.venueMapping.entries
+          }
+        : null,
+      pendingIssueCount: activePlan.venueMapping?.counts.total ?? 0,
+      pendingBlockingCount:
+        activePlan.venueMapping?.status === 'draft' ? activePlan.venueMapping.counts.blocking : 0
     };
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }));
     const anchor = document.createElement('a');
@@ -966,6 +1033,31 @@ export default function App() {
               </Text>
             </Box>
 
+            <Button
+              variant="outline"
+              leftIcon={<ArrowLeftRight size={16} />}
+              rightIcon={
+                activePlan.venueMapping ? (
+                  <Badge
+                    colorScheme={
+                      activePlan.venueMapping.status === 'draft'
+                        ? activePlan.venueMapping.counts.blocking > 0
+                          ? 'red'
+                          : 'orange'
+                        : 'green'
+                    }
+                    borderRadius="full"
+                  >
+                    {activePlan.venueMapping.status === 'draft'
+                      ? `${activePlan.venueMapping.counts.blocking} 待处理`
+                      : '已换台'}
+                  </Badge>
+                ) : undefined
+              }
+              onClick={() => setMappingOpen(true)}
+            >
+              巡演换台对账
+            </Button>
             <Button variant="outline" leftIcon={<Copy size={16} />} onClick={duplicatePlan}>复制为新方案</Button>
             <Button variant="ghost" leftIcon={<RefreshCw size={16} />} onClick={exportPlan}>导出当前方案 JSON</Button>
           </VStack>
@@ -1143,6 +1235,16 @@ export default function App() {
       <Box as="footer" maxW="1920px" mx="auto" px={5} pb={7} color="whiteAlpha.400" fontSize="xs" textAlign="center">
         所有方案与草稿保存在当前浏览器。清除站点数据会删除灯光设计台内容。
       </Box>
+
+      <VenueMappingModal
+        open={mappingOpen}
+        plan={activePlan}
+        role={workspace.role}
+        onClose={() => setMappingOpen(false)}
+        onImport={importVenueMapping}
+        onApply={applyVenueMapping}
+        onReset={resetVenueMapping}
+      />
     </Box>
   );
 }
