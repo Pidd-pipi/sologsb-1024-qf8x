@@ -1,4 +1,12 @@
-import type { Cue, CueConflict, LightingPlan, Scene, UserRole } from './types';
+import type { ChannelMappingEntry, Cue, CueConflict, LightingPlan, Scene, UserRole, VenueMappingIssue, VenueMappingIssueKind } from './types';
+
+export const DMX_UNIVERSE_SIZE = 512;
+
+export const venueMappingIssueLabels: Record<VenueMappingIssueKind, string> = {
+  unmapped: '未映射通道',
+  duplicate: '重复占用',
+  overflow: '超出 512 路'
+};
 
 const FIXED_TIME = '2026-09-25T02:00:00.000Z';
 
@@ -135,6 +143,78 @@ const tourPlan: LightingPlan = {
 };
 
 export const samplePlans = [mainPlan, coolPlan, tourPlan];
+
+/**
+ * 解析控台提供的通道映射文本。每行一条，格式：
+ *   原通道, 新通道, 宇宙, 地址
+ * 支持中英文逗号或制表符分隔；`#` 开头为注释行。
+ * 地址缺失或非法时保留为 0，由对账分析归入“超出 512 路”待处理项。
+ */
+export function parseVenueMapping(text: string): ChannelMappingEntry[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .map((line, index) => {
+      const [sourceChannel = '', targetChannel = '', universe = '1', address = '0'] = line
+        .split(/[,，\t]/)
+        .map((part) => part.trim());
+      return {
+        id: `map-${index + 1}`,
+        sourceChannel,
+        targetChannel,
+        universe: Number(universe) || 1,
+        address: Number(address) || 0
+      };
+    })
+    .filter((entry) => entry.sourceChannel && entry.targetChannel);
+}
+
+/**
+ * 换台对账：只分析、不修改方案。把未映射、重复占用和超出每个 DMX 宇宙
+ * 512 路的项目列为待处理，供舞台监督确认前核对。
+ */
+export function analyzeVenueMapping(plan: LightingPlan, entries: ChannelMappingEntry[]): VenueMappingIssue[] {
+  const issues: VenueMappingIssue[] = [];
+  const usedChannels = [
+    ...new Set(plan.scenes.flatMap((scene) => scene.cues.map((cue) => cue.channel.trim())).filter(Boolean))
+  ];
+  const mappedSources = new Set(entries.map((entry) => entry.sourceChannel.trim()));
+
+  for (const channel of usedChannels) {
+    if (!mappedSources.has(channel)) {
+      issues.push({
+        id: `unmapped-${channel}`,
+        kind: 'unmapped',
+        message: `通道 ${channel} 未在新场馆映射中出现，确认后将保持原样`
+      });
+    }
+  }
+
+  const occupied = new Map<string, ChannelMappingEntry>();
+  for (const entry of entries) {
+    if (!Number.isInteger(entry.address) || entry.address < 1 || entry.address > DMX_UNIVERSE_SIZE) {
+      issues.push({
+        id: `overflow-${entry.id}`,
+        kind: 'overflow',
+        message: `${entry.sourceChannel} → ${entry.targetChannel} 的地址 ${entry.address} 超出宇宙 ${entry.universe} 的 ${DMX_UNIVERSE_SIZE} 路范围，应用时将被跳过`
+      });
+      continue;
+    }
+    const key = `${entry.universe}/${entry.address}`;
+    const existing = occupied.get(key);
+    if (existing) {
+      issues.push({
+        id: `duplicate-${key}-${entry.id}`,
+        kind: 'duplicate',
+        message: `宇宙 ${entry.universe} 地址 ${entry.address} 被 ${existing.sourceChannel}→${existing.targetChannel} 与 ${entry.sourceChannel}→${entry.targetChannel} 重复占用`
+      });
+    } else {
+      occupied.set(key, entry);
+    }
+  }
+  return issues;
+}
 
 export function recalculatePlans(plans: LightingPlan[]) {
   for (const plan of plans) {

@@ -56,12 +56,14 @@ import { CSS } from '@dnd-kit/utilities';
 import {
   AlertCircle,
   ArrowDown,
+  ArrowLeftRight,
   ArrowUp,
   CheckCircle2,
   ChevronRight,
   CircleDot,
   Clock3,
   Copy,
+  FileUp,
   GripVertical,
   Lightbulb,
   Lock,
@@ -77,17 +79,22 @@ import {
   Undo2,
   Unlock,
   Wifi,
-  WifiOff
+  WifiOff,
+  XCircle
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
+  analyzeVenueMapping,
   colorPresets,
   detectConflicts,
+  parseVenueMapping,
   roleLabels,
-  statusLabels
+  statusLabels,
+  venueMappingIssueLabels
 } from './data';
 import {
   LIGHTING_STORAGE_KEY,
+  canConfirmVenueMapping,
   canEditScene,
   canFreeze,
   findActivePlan,
@@ -96,7 +103,7 @@ import {
   formatTime,
   useLightingDesk
 } from './state/useLightingDesk';
-import type { Cue, CueConflict, LightingPlan, Scene, UserRole, Workspace } from './types';
+import type { Cue, CueConflict, LightingPlan, Scene, UserRole, VenueMappingSession, Workspace } from './types';
 
 const statusColors = {
   draft: 'orange',
@@ -173,7 +180,8 @@ function SortableCueRow({ cue, index, selected, disabled, conflicts, onSelect }:
             {cue.followCueId ? <Tag size="sm" variant="subtle" colorScheme="purple">跟随</Tag> : null}
           </Flex>
           <Text color="whiteAlpha.500" fontSize="xs" noOfLines={1}>
-            {cue.position} · {cue.channel} · {cue.color}
+            {cue.position} · {cue.channel}
+            {cue.dmxUniverse ? ` · U${cue.dmxUniverse}/${cue.dmxAddress}` : ''} · {cue.color}
           </Text>
         </Box>
         <Box w="72px" textAlign="right">
@@ -517,6 +525,160 @@ function ConflictList({
   );
 }
 
+interface VenueMappingPanelProps {
+  plan: LightingPlan;
+  sessions: VenueMappingSession[];
+  canImport: boolean;
+  canConfirm: boolean;
+  onImport: (venueName: string, text: string) => void;
+  onConfirm: (sessionId: string) => void;
+  onDiscard: (sessionId: string) => void;
+}
+
+function VenueMappingPanel({ plan, sessions, canImport, canConfirm, onImport, onConfirm, onDiscard }: VenueMappingPanelProps) {
+  const [venueName, setVenueName] = useState('');
+  const [mappingText, setMappingText] = useState('');
+  const pending = sessions.find((session) => session.status === 'pending');
+  const applied = sessions.filter((session) => session.status === 'applied');
+  const frozenSceneNames = plan.scenes.filter((scene) => scene.frozen).map((scene) => scene.name);
+
+  return (
+    <VStack align="stretch" spacing={4}>
+      {pending ? (
+        <>
+          <Alert status="info" borderRadius="lg">
+            <AlertIcon />
+            <AlertDescription fontSize="sm">
+              已导入「{pending.venueName}」映射 {pending.entries.length} 条，待处理 {pending.issues.length} 项。
+              舞台监督确认前不会改动当前提示。
+            </AlertDescription>
+          </Alert>
+
+          <SimpleGrid columns={3} spacing={2}>
+            {(['unmapped', 'duplicate', 'overflow'] as const).map((kind) => {
+              const count = pending.issues.filter((issue) => issue.kind === kind).length;
+              return (
+                <Box key={kind} p={3} borderRadius="lg" bg="blackAlpha.200" textAlign="center">
+                  <Text fontSize="2xl" fontWeight="800" color={count ? 'orange.300' : 'green.300'}>{count}</Text>
+                  <Text color="whiteAlpha.500" fontSize="xs">{venueMappingIssueLabels[kind]}</Text>
+                </Box>
+              );
+            })}
+          </SimpleGrid>
+
+          {pending.issues.length ? (
+            <VStack align="stretch" spacing={2} aria-label="换台待处理列表">
+              {pending.issues.map((issue) => (
+                <Flex key={issue.id} gap={2} p={2} borderRadius="md" bg="blackAlpha.200" borderWidth="1px" borderColor="orange.800" align="start">
+                  <Box mt="2px" color="orange.300" flexShrink={0}><AlertCircle size={14} /></Box>
+                  <Text fontSize="xs">{issue.message}</Text>
+                </Flex>
+              ))}
+            </VStack>
+          ) : (
+            <Alert status="success" borderRadius="lg">
+              <AlertIcon />
+              <AlertDescription fontSize="sm">映射覆盖全部在用通道，无重复占用或超范围地址。</AlertDescription>
+            </Alert>
+          )}
+
+          {frozenSceneNames.length ? (
+            <Text color="whiteAlpha.500" fontSize="xs">
+              冻结场次将被跳过：{frozenSceneNames.join('、')}
+            </Text>
+          ) : null}
+
+          <HStack>
+            <Button
+              colorScheme="amber"
+              size="sm"
+              leftIcon={<ShieldCheck size={15} />}
+              isDisabled={!canConfirm}
+              onClick={() => onConfirm(pending.id)}
+            >
+              舞台监督确认并应用
+            </Button>
+            <Button size="sm" variant="ghost" leftIcon={<XCircle size={15} />} isDisabled={!canImport} onClick={() => onDiscard(pending.id)}>
+              放弃映射
+            </Button>
+          </HStack>
+          {!canConfirm ? (
+            <Text color="whiteAlpha.500" fontSize="xs">当前角色不能确认换台映射，请切换到舞台监督或灯光设计。</Text>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <Text color="whiteAlpha.500" fontSize="xs" lineHeight="1.7">
+            巡演换到新场馆后，在此导入控台给的通道映射。每行一条：
+            <Text as="span" fontFamily="mono" color="whiteAlpha.700"> 原通道, 新通道, 宇宙, 地址</Text>
+            。导入后先对账（未映射 / 重复占用 / 超 512 路），确认前不改动任何提示。
+          </Text>
+          <FormControl>
+            <FormLabel htmlFor="venue-name">新场馆名称</FormLabel>
+            <Input
+              id="venue-name"
+              size="sm"
+              value={venueName}
+              isDisabled={!canImport}
+              placeholder="例如：巡演 B 剧场"
+              onChange={(event) => setVenueName(event.target.value)}
+            />
+          </FormControl>
+          <FormControl>
+            <FormLabel htmlFor="venue-mapping-text">通道映射表</FormLabel>
+            <Textarea
+              id="venue-mapping-text"
+              size="sm"
+              minH="150px"
+              fontFamily="mono"
+              value={mappingText}
+              isDisabled={!canImport}
+              placeholder={'# 原通道, 新通道, 宇宙, 地址\nGrand Master, GM, 1, 1\nCyc 1, Cyc-A, 1, 24'}
+              onChange={(event) => setMappingText(event.target.value)}
+            />
+          </FormControl>
+          <Button
+            size="sm"
+            colorScheme="blue"
+            variant="outline"
+            leftIcon={<FileUp size={15} />}
+            isDisabled={!canImport || !mappingText.trim()}
+            onClick={() => {
+              onImport(venueName, mappingText);
+              setMappingText('');
+            }}
+          >
+            导入映射并对账
+          </Button>
+        </>
+      )}
+
+      {applied.length ? (
+        <Box>
+          <Text color="whiteAlpha.600" fontSize="xs" mb={2}>已应用的换台记录</Text>
+          <VStack align="stretch" spacing={2}>
+            {applied.map((session) => (
+              <Box key={session.id} p={3} borderRadius="lg" bg="blackAlpha.200" borderWidth="1px" borderColor="whiteAlpha.100">
+                <Flex align="center" gap={2}>
+                  <ArrowLeftRight size={14} color="#68d391" />
+                  <Text fontSize="sm" fontWeight="650">{session.venueName}</Text>
+                  <Spacer />
+                  <Tag size="sm" colorScheme="green">已应用</Tag>
+                </Flex>
+                <Text mt={1} color="whiteAlpha.500" fontSize="10px">
+                  {new Date(session.appliedAt ?? session.createdAt).toLocaleString('zh-CN')} ·
+                  映射 {session.entries.length} 条 · 应用 {session.appliedSceneIds?.length ?? 0} 场 ·
+                  跳过冻结 {session.skippedFrozenSceneIds?.length ?? 0} 场 · 对账时待处理 {session.issues.length} 项
+                </Text>
+              </Box>
+            ))}
+          </VStack>
+        </Box>
+      ) : null}
+    </VStack>
+  );
+}
+
 function ComparePlan({
   activePlan,
   comparePlan,
@@ -585,7 +747,10 @@ export default function App() {
     : [];
   const editable = canEditScene(workspace.role, activeScene);
   const freezer = canFreeze(workspace.role);
+  const mappingApprover = canConfirmVenueMapping(workspace.role);
   const incompleteCount = activePlan.scenes.flatMap((scene) => scene.cues).filter((cue) => cue.status !== 'confirmed').length;
+  const planMappingSessions = workspace.mappingSessions.filter((session) => session.planId === activePlan.id);
+  const pendingMapping = planMappingSessions.find((session) => session.status === 'pending');
 
   useEffect(() => {
     try {
@@ -703,6 +868,74 @@ export default function App() {
     });
   }
 
+  function importVenueMapping(venueName: string, text: string) {
+    const entries = parseVenueMapping(text);
+    if (!entries.length) {
+      toast({ title: '没有解析到有效映射行', description: '每行格式：原通道, 新通道, 宇宙, 地址', status: 'warning' });
+      return;
+    }
+    commit('导入新场馆通道映射（待确认，未改动提示）', (next) => {
+      const plan = next.plans.find((item) => item.id === next.activePlanId);
+      if (!plan) return;
+      next.mappingSessions = next.mappingSessions.filter(
+        (session) => !(session.planId === plan.id && session.status === 'pending')
+      );
+      next.mappingSessions.push({
+        id: `venue-${Date.now().toString(36)}`,
+        planId: plan.id,
+        venueName: venueName.trim() || '未命名场馆',
+        createdAt: new Date().toISOString(),
+        status: 'pending',
+        entries,
+        issues: analyzeVenueMapping(plan, entries)
+      });
+    });
+    toast({ title: '映射已导入', description: '对账结果已列为待处理，确认前不会改动提示。', status: 'info', duration: 2400 });
+  }
+
+  function confirmVenueMapping(sessionId: string) {
+    if (!mappingApprover) {
+      toast({ title: '需要舞台监督或灯光设计角色确认', status: 'warning' });
+      return;
+    }
+    commit('舞台监督确认换台映射，应用到未冻结场次并重算', (next) => {
+      const plan = next.plans.find((item) => item.id === next.activePlanId);
+      const session = next.mappingSessions.find((item) => item.id === sessionId);
+      if (!plan || !session || session.status !== 'pending') return;
+      const validEntries = session.entries.filter((entry) => Number.isInteger(entry.address) && entry.address >= 1 && entry.address <= 512);
+      const bySource = new Map(validEntries.map((entry) => [entry.sourceChannel.trim(), entry]));
+      const appliedSceneIds: string[] = [];
+      const skippedFrozenSceneIds: string[] = [];
+      for (const scene of plan.scenes) {
+        if (scene.frozen) {
+          skippedFrozenSceneIds.push(scene.id);
+          continue;
+        }
+        let touched = false;
+        for (const cue of scene.cues) {
+          const entry = bySource.get(cue.channel.trim());
+          if (!entry) continue;
+          cue.channel = entry.targetChannel;
+          cue.dmxUniverse = entry.universe;
+          cue.dmxAddress = entry.address;
+          touched = true;
+        }
+        if (touched) appliedSceneIds.push(scene.id);
+      }
+      session.status = 'applied';
+      session.appliedAt = new Date().toISOString();
+      session.appliedSceneIds = appliedSceneIds;
+      session.skippedFrozenSceneIds = skippedFrozenSceneIds;
+    });
+    toast({ title: '映射已应用', description: '未冻结场次已换用新通道，跟随关系、叠光与全剧时间已重算。', status: 'success', duration: 2600 });
+  }
+
+  function discardVenueMapping(sessionId: string) {
+    commit('放弃待确认的换台映射', (next) => {
+      next.mappingSessions = next.mappingSessions.filter((session) => session.id !== sessionId);
+    });
+  }
+
   function duplicatePlan() {
     const id = `plan-${Date.now().toString(36)}`;
     commit('复制为新方案', (next) => {
@@ -805,7 +1038,11 @@ export default function App() {
       exportedAt: new Date().toISOString(),
       plan: activePlan,
       conflicts: activeConflicts,
-      role: workspace.role
+      role: workspace.role,
+      venueMapping: {
+        sessions: planMappingSessions,
+        pendingIssueCount: pendingMapping?.issues.length ?? 0
+      }
     };
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }));
     const anchor = document.createElement('a');
@@ -1075,6 +1312,9 @@ export default function App() {
                 <Tab>提示编辑</Tab>
                 <Tab>冲突 <Badge ml={1} colorScheme={activeConflicts.length ? 'orange' : 'green'}>{activeConflicts.length}</Badge></Tab>
                 <Tab>关系图</Tab>
+                <Tab>
+                  换台对账 {pendingMapping ? <Badge ml={1} colorScheme="orange">{pendingMapping.issues.length}</Badge> : null}
+                </Tab>
               </TabList>
               <TabPanels>
                 <TabPanel px={4} pb={5}>
@@ -1128,6 +1368,17 @@ export default function App() {
                       })}
                     </VStack>
                   ) : null}
+                </TabPanel>
+                <TabPanel px={4} pb={5}>
+                  <VenueMappingPanel
+                    plan={activePlan}
+                    sessions={planMappingSessions}
+                    canImport={workspace.role !== 'readonly'}
+                    canConfirm={mappingApprover}
+                    onImport={importVenueMapping}
+                    onConfirm={confirmVenueMapping}
+                    onDiscard={discardVenueMapping}
+                  />
                 </TabPanel>
               </TabPanels>
             </Tabs>

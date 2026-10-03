@@ -18,6 +18,8 @@ export interface Cue {
   targetNote: string;
   notes: string;
   status: CueStatus;
+  dmxUniverse?: number;
+  dmxAddress?: number;
   startTime?: number;
   duration?: number;
   endTime?: number;
@@ -58,6 +60,36 @@ export interface Workspace {
   selectedSceneId: string;
   selectedCueId: string;
   role: UserRole;
+  mappingSessions: VenueMappingSession[];
+}
+
+export interface ChannelMappingEntry {
+  id: string;
+  sourceChannel: string;
+  targetChannel: string;
+  universe: number;
+  address: number;
+}
+
+export type VenueMappingIssueKind = 'unmapped' | 'duplicate' | 'overflow';
+
+export interface VenueMappingIssue {
+  id: string;
+  kind: VenueMappingIssueKind;
+  message: string;
+}
+
+export interface VenueMappingSession {
+  id: string;
+  planId: string;
+  venueName: string;
+  createdAt: string;
+  status: 'pending' | 'applied';
+  entries: ChannelMappingEntry[];
+  issues: VenueMappingIssue[];
+  appliedAt?: string;
+  appliedSceneIds?: string[];
+  skippedFrozenSceneIds?: string[];
 }
 
 export interface EditorState {

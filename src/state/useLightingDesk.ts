@@ -16,7 +16,8 @@ export function createInitialWorkspace(): Workspace {
     comparePlanId: plans[1].id,
     selectedSceneId: plans[0].scenes[0].id,
     selectedCueId: plans[0].scenes[0].cues[0].id,
-    role: 'designer'
+    role: 'designer',
+    mappingSessions: []
   };
 }
 
@@ -42,6 +43,7 @@ export type EditorAction =
 
 function normalizeWorkspace(workspace: Workspace) {
   recalculatePlans(workspace.plans);
+  workspace.mappingSessions = workspace.mappingSessions ?? [];
   const active = workspace.plans.find((plan) => plan.id === workspace.activePlanId) ?? workspace.plans[0];
   if (!active) return workspace;
   workspace.activePlanId = active.id;
@@ -167,6 +169,11 @@ export function canEditScene(role: UserRole, scene: Scene | undefined) {
 
 export function canFreeze(role: UserRole) {
   return role === 'designer' || role === 'stage-manager';
+}
+
+/** 换台映射须由舞台监督确认；灯光设计可作为代理确认人。 */
+export function canConfirmVenueMapping(role: UserRole) {
+  return role === 'stage-manager' || role === 'designer';
 }
 
 export function formatTime(value: number | undefined) {
